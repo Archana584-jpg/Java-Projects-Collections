@@ -22,7 +22,7 @@ pipeline {
                 checkout scm
                 script {
                     env.COMMIT_HASH = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
-                    env.REPO_URL = sh(script: "git config --get remote.origin.url | sed 's|\\.git$||'", returnStdout: true).trim()
+                    env.REPO_URL = sh(script: 'git config --get remote.origin.url | sed "s/.git//"', returnStdout: true).trim()                    
                     env.IS_PR = (env.CHANGE_ID != null) ? 'true' : 'false'
                     
                     echo "Commit: ${env.COMMIT_HASH}"
