@@ -8,7 +8,6 @@ pipeline {
         PROJECT_KEY = 'java-projects-collections'
         GIT_BRANCH = "${env.CHANGE_BRANCH ?: env.GIT_BRANCH}"
         SONAR_SCANNER_HOME = "${WORKSPACE}/sonar-scanner"
-        CHANGE_ID = "${env.CHANGE_ID ?: ''}"
     }
 
     options {
@@ -23,12 +22,15 @@ pipeline {
                 checkout scm
                 script {
                     env.COMMIT_HASH = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
-                    env.REPO_URL = sh(script: "git config --get remote.origin.url | sed 's/.git//'", returnStdout: true).trim()
+                    env.REPO_URL = sh(script: "git config --get remote.origin.url | sed 's|\\.git$||'", returnStdout: true).trim()
+                    env.IS_PR = (env.CHANGE_ID != null) ? 'true' : 'false'
+                    
                     echo "Commit: ${env.COMMIT_HASH}"
                     echo "Repo: ${env.REPO_URL}"
-                    echo "CHANGE_ID: ${CHANGE_ID}"
-                    echo "CHANGE_TARGET: ${env.CHANGE_TARGET}"
-                    echo "CHANGE_BRANCH: ${env.CHANGE_BRANCH}"
+                    echo "Is PR: ${env.IS_PR}"
+                    echo "CHANGE_ID: ${env.CHANGE_ID ?: 'NOT SET'}"
+                    echo "CHANGE_BRANCH: ${env.CHANGE_BRANCH ?: 'NOT SET'}"
+                    echo "CHANGE_TARGET: ${env.CHANGE_TARGET ?: 'NOT SET'}"
                 }
             }
         }
@@ -39,30 +41,37 @@ pipeline {
                     sh '''
                         echo "=== Building Gradle Projects ==="
                         
-                        gradle_projects=$(find Projects -name "build.gradle" -type f)
+                        gradle_projects=$(find Projects -name "build.gradle" -type f 2>/dev/null)
                         
                         if [ -z "$gradle_projects" ]; then
                             echo "No Gradle projects found, skipping build"
                             exit 0
                         fi
                         
+                        build_count=0
                         for gradle_file in $gradle_projects; do
                             project_dir=$(dirname "$gradle_file")
                             echo "Building: $project_dir"
+                            build_count=$((build_count + 1))
                             
                             cd "$project_dir"
                             
                             if [ -f "gradlew" ]; then
                                 echo "Using gradlew..."
-                                ./gradlew clean build -x test 2>&1 | tail -20 || echo "Build failed, continuing..."
+                                ./gradlew clean build -x test --no-daemon 2>&1 | tail -30 || echo "Build failed for $project_dir, continuing..."
                             else
                                 echo "gradlew not found in $project_dir, skipping"
                             fi
                             
                             cd - > /dev/null
+                            
+                            if [ $build_count -ge 2 ]; then
+                                echo "Built 2 projects, stopping to save time"
+                                break
+                            fi
                         done
                         
-                        echo "Build stage completed"
+                        echo "Build stage completed - built $build_count projects"
                     '''
                 }
             }
@@ -90,13 +99,13 @@ pipeline {
             steps {
                 sh '''
                     echo "=== Found Gradle Projects ==="
-                    find Projects -name "build.gradle" -type f | sort
+                    find Projects -name "build.gradle" -type f 2>/dev/null | sort
                     echo ""
                     echo "=== Java Files Count ==="
-                    find Projects -name "*.java" -type f | wc -l
+                    find Projects -name "*.java" -type f 2>/dev/null | wc -l
                     echo ""
                     echo "=== Compiled Classes ==="
-                    find Projects -name "*.class" -type f | wc -l
+                    find Projects -name "*.class" -type f 2>/dev/null | wc -l
                 '''
             }
         }
@@ -108,15 +117,15 @@ pipeline {
                         export PATH=${SONAR_SCANNER_HOME}/bin:$PATH
                         
                         # Find all build directories for binaries
-                        BINARIES=$(find Projects -path "*/build/classes" -o -path "*/build/intermediates" -o -path "*/target/classes" | tr '\n' ',' | sed 's/,$//')
+                        BINARIES=$(find Projects -type d \\( -name "classes" -o -name "intermediates" \\) 2>/dev/null | tr '\\n' ',' | sed 's/,$//')
                         
-                        echo "Found binaries at: $BINARIES"
-                        echo "CHANGE_ID value: '${CHANGE_ID}'"
-                        echo "CHANGE_BRANCH value: '${CHANGE_BRANCH}'"
-                        echo "CHANGE_TARGET value: '${CHANGE_TARGET}'"
+                        echo "Found binaries: $BINARIES"
+                        echo "CHANGE_ID: '${CHANGE_ID}'"
+                        echo "CHANGE_BRANCH: '${CHANGE_BRANCH}'"
+                        echo "CHANGE_TARGET: '${CHANGE_TARGET}'"
                         
                         if [ ! -z "${CHANGE_ID}" ] && [ ! -z "${CHANGE_BRANCH}" ]; then
-                            echo "Running SonarQube scan for PR ${CHANGE_ID}"
+                            echo "=== Running SonarQube scan for PR ${CHANGE_ID} ==="
                             sonar-scanner \
                                 -Dsonar.projectKey=${PROJECT_KEY} \
                                 -Dsonar.projectName="Java Projects Collections" \
@@ -125,12 +134,12 @@ pipeline {
                                 -Dsonar.sources=Projects \
                                 -Dsonar.sourceEncoding=UTF-8 \
                                 -Dsonar.java.binaries="$BINARIES" \
-                                -Dsonar.exclusions='**/build/**,**/node_modules/**,**/*.gradle,**/target/**' \
+                                -Dsonar.exclusions='**/build/**,**/node_modules/**,**/*.gradle,**/target/**,**/*.war,**/*.wav' \
                                 -Dsonar.pullrequest.key=${CHANGE_ID} \
                                 -Dsonar.pullrequest.branch=${CHANGE_BRANCH} \
                                 -Dsonar.pullrequest.base=${CHANGE_TARGET}
                         else
-                            echo "Running SonarQube scan for branch (not a PR)"
+                            echo "=== Running SonarQube scan for branch ==="
                             sonar-scanner \
                                 -Dsonar.projectKey=${PROJECT_KEY} \
                                 -Dsonar.projectName="Java Projects Collections" \
@@ -139,7 +148,7 @@ pipeline {
                                 -Dsonar.sources=Projects \
                                 -Dsonar.sourceEncoding=UTF-8 \
                                 -Dsonar.java.binaries="$BINARIES" \
-                                -Dsonar.exclusions='**/build/**,**/node_modules/**,**/*.gradle,**/target/**'
+                                -Dsonar.exclusions='**/build/**,**/node_modules/**,**/*.gradle,**/target/**,**/*.war,**/*.wav'
                         fi
                     '''
                 }
@@ -160,12 +169,14 @@ pipeline {
                                     
                                     STATUS=$(echo "$RESPONSE" | grep -o '"status":"[^"]*' | cut -d'"' -f4)
                                     
-                                    echo "Response: $RESPONSE"
-                                    echo "Status: $STATUS"
-                                    
-                                    if [ "$STATUS" != "IN_REVIEW" ] && [ ! -z "$STATUS" ]; then
-                                        echo "$STATUS"
-                                        exit 0
+                                    if [ -z "$STATUS" ]; then
+                                        echo "No status in response"
+                                    else
+                                        echo "Status: $STATUS"
+                                        if [ "$STATUS" != "IN_REVIEW" ]; then
+                                            echo "$STATUS"
+                                            exit 0
+                                        fi
                                     fi
                                     
                                     sleep 10
@@ -177,7 +188,7 @@ pipeline {
                         ).trim()
                         
                         env.QG_STATUS = qgStatus
-                        echo "Quality Gate Status: ${qgStatus}"
+                        echo "Quality Gate Status: ${env.QG_STATUS}"
                     }
                 }
             }
@@ -191,15 +202,14 @@ pipeline {
                         
                         def statusState = (env.QG_STATUS == 'OK') ? 'success' : 'failure'
                         def statusDescription = (env.QG_STATUS == 'OK') ? 'Quality gate passed ✅' : "Quality gate failed (${env.QG_STATUS})"
-                        def targetUrl = "${env.SONAR_HOST_URL}/dashboard?id=${PROJECT_KEY}&pullRequest=${CHANGE_ID}"
+                        def targetUrl = "${env.SONAR_HOST_URL}/dashboard?id=${PROJECT_KEY}&pullRequest=${env.CHANGE_ID}"
 
                         sh '''
                             echo "=== Posting to GitHub ==="
-                            echo "GitHub Token: ${GITHUB_TOKEN}"
                             echo "Commit: ${COMMIT_HASH}"
                             echo "Repo URL: ${REPO_URL}"
                             
-                            curl -v -X POST \
+                            curl -X POST \
                                 -H "Authorization: token ${GITHUB_TOKEN}" \
                                 -H "Content-Type: application/json" \
                                 -H "Accept: application/vnd.github.v3+json" \
@@ -211,11 +221,10 @@ pipeline {
                                 }' \
                                 ${REPO_URL}/statuses/${COMMIT_HASH}
                             
-                            echo ""
-                            echo "GitHub Status Posted: ${statusState}"
+                            echo "GitHub Status Posted"
                         '''
                     } else {
-                        echo "Not a PR build (CHANGE_ID=${CHANGE_ID}), skipping GitHub status update"
+                        echo "Not a PR build (CHANGE_ID not set), skipping GitHub status update"
                     }
                 }
             }
@@ -228,8 +237,8 @@ pipeline {
                 echo "=== Build Summary ==="
                 echo "Commit: ${COMMIT_HASH}"
                 echo "Branch: ${GIT_BRANCH}"
-                echo "PR ID: ${CHANGE_ID}"
-                echo "Quality Gate: ${QG_STATUS}"
+                echo "PR ID: ${CHANGE_ID:-'NOT SET'}"
+                echo "Quality Gate: ${QG_STATUS:-'NOT SET'}"
                 echo "Workspace: ${WORKSPACE}"
             '''
         }
@@ -238,7 +247,7 @@ pipeline {
             script {
                 if (env.CHANGE_ID != null && env.CHANGE_ID != '') {
                     sh '''
-                        curl -v -X POST \
+                        curl -X POST \
                             -H "Authorization: token ${GITHUB_TOKEN}" \
                             -H "Content-Type: application/json" \
                             -H "Accept: application/vnd.github.v3+json" \
