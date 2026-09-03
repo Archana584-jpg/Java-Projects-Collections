@@ -42,45 +42,46 @@ pipeline {
             steps {
                 script {
                     def t0 = System.currentTimeMillis()
-                    sh '''
+                    sh '''#!/bin/bash
                         echo "=== Building Gradle Projects ==="
 
-                        gradle_projects=$(find Projects -name "build.gradle" -type f 2>/dev/null)
+                        find Projects -name "build.gradle" -type f 2>/dev/null > /tmp/gradle_projects.txt
 
-                        if [ -z "$gradle_projects" ]; then
+                        if [ ! -s /tmp/gradle_projects.txt ]; then
                             echo "No Gradle projects found, skipping build"
                             exit 0
                         fi
 
                         build_count=0
-                        for gradle_file in $gradle_projects; do
+                        while IFS= read -r gradle_file; do
                             project_dir=$(dirname "$gradle_file")
                             echo "Building: $project_dir"
                             build_count=$((build_count + 1))
 
-                            cd "$project_dir"
+                            (
+                                cd "$project_dir" || exit 0
 
-                            if [ -f "gradlew" ]; then
-                                echo "Using gradlew..."
-                                start_ts=$(date +%s)
-                                timeout 240 ./gradlew clean build -x test --no-daemon --offline 2>&1 | tail -30
-                                gradle_rc=$?
-                                end_ts=$(date +%s)
-                                echo "gradlew for $project_dir took $((end_ts - start_ts))s (exit $gradle_rc)"
-                                if [ $gradle_rc -ne 0 ]; then
-                                    echo "NOTE: gradlew failed or timed out for $project_dir (likely --offline cache miss or dependency issue), continuing..."
+                                if [ -f "gradlew" ]; then
+                                    echo "Using gradlew..."
+                                    chmod +x gradlew
+                                    start_ts=$(date +%s)
+                                    timeout 240 ./gradlew clean build -x test --no-daemon --offline 2>&1 | tail -30
+                                    gradle_rc=$?
+                                    end_ts=$(date +%s)
+                                    echo "gradlew for $project_dir took $((end_ts - start_ts))s (exit $gradle_rc)"
+                                    if [ $gradle_rc -ne 0 ]; then
+                                        echo "NOTE: gradlew failed or timed out for $project_dir (likely --offline cache miss or dependency issue), continuing..."
+                                    fi
+                                else
+                                    echo "gradlew not found in $project_dir, skipping"
                                 fi
-                            else
-                                echo "gradlew not found in $project_dir, skipping"
-                            fi
-
-                            cd - > /dev/null
+                            )
 
                             if [ $build_count -ge 2 ]; then
                                 echo "Built 2 projects, stopping to save time"
                                 break
                             fi
-                        done
+                        done < /tmp/gradle_projects.txt
 
                         echo "Build stage completed - built $build_count projects"
                     '''
@@ -185,29 +186,30 @@ pipeline {
                     def t0 = System.currentTimeMillis()
                     timeout(time: 3, unit: 'MINUTES') {
                         def qgStatus = sh(
-                            script: '''
-                                for i in {1..18}; do
-                                    echo "Checking Quality Gate (attempt $i/18)..."
+                            script: '''#!/bin/bash
+                                final_status="TIMEOUT"
+
+                                for i in $(seq 1 18); do
+                                    echo "Checking Quality Gate (attempt $i/18)..." >&2
 
                                     RESPONSE=$(curl -s -u ${SONAR_TOKEN}: \
                                         "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}")
 
                                     STATUS=$(echo "$RESPONSE" | grep -o '"status":"[^"]*' | cut -d'"' -f4)
+                                    echo "Status: ${STATUS:-<none>}" >&2
 
-                                    if [ -z "$STATUS" ]; then
-                                        echo "No status in response"
-                                    else
-                                        echo "Status: $STATUS"
-                                        if [ "$STATUS" != "IN_REVIEW" ]; then
-                                            echo "$STATUS"
-                                            exit 0
-                                        fi
+                                    # OK / ERROR are terminal. NONE and IN_REVIEW mean
+                                    # the SonarQube background task hasn't finished
+                                    # processing the report yet -- keep polling.
+                                    if [ "$STATUS" = "OK" ] || [ "$STATUS" = "ERROR" ]; then
+                                        final_status="$STATUS"
+                                        break
                                     fi
 
                                     sleep 10
                                 done
 
-                                echo "TIMEOUT"
+                                echo "$final_status"
                             ''',
                             returnStdout: true
                         ).trim()
