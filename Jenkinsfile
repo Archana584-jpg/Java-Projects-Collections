@@ -1,7 +1,6 @@
 pipeline {
     agent any
 
-
     environment {
         GITHUB_TOKEN = credentials('archana-sonar')
         SONAR_TOKEN = credentials('sonar-token')
@@ -26,6 +25,9 @@ pipeline {
                     env.REPO_URL = sh(script: "git config --get remote.origin.url | sed 's/.git//'", returnStdout: true).trim()
                     echo "Commit: ${env.COMMIT_HASH}"
                     echo "Repo: ${env.REPO_URL}"
+                    echo "CHANGE_ID: ${env.CHANGE_ID}"
+                    echo "CHANGE_TARGET: ${env.CHANGE_TARGET}"
+                    echo "CHANGE_BRANCH: ${env.CHANGE_BRANCH}"
                 }
             }
         }
@@ -61,34 +63,41 @@ pipeline {
         }
 
         stage('SonarQube Scan') {
-            when {
-                expression { env.CHANGE_ID != null }
-            }
             steps {
                 script {
                     sh '''
                         export PATH=${SONAR_SCANNER_HOME}/bin:$PATH
                         
-                        sonar-scanner \
-                            -Dsonar.projectKey=${PROJECT_KEY} \
-                            -Dsonar.projectName="Java Projects Collections" \
-                            -Dsonar.host.url=${SONAR_HOST_URL} \
-                            -Dsonar.login=${SONAR_TOKEN} \
-                            -Dsonar.sources=Projects \
-                            -Dsonar.sourceEncoding=UTF-8 \
-                            -Dsonar.exclusions='**/build/**,**/node_modules/**,**/*.gradle' \
-                            -Dsonar.pullrequest.key=${CHANGE_ID} \
-                            -Dsonar.pullrequest.branch=${CHANGE_BRANCH} \
-                            -Dsonar.pullrequest.base=${CHANGE_TARGET}
+                        if [ ! -z "${CHANGE_ID}" ]; then
+                            echo "Running SonarQube scan for PR ${CHANGE_ID}"
+                            sonar-scanner \
+                                -Dsonar.projectKey=${PROJECT_KEY} \
+                                -Dsonar.projectName="Java Projects Collections" \
+                                -Dsonar.host.url=${SONAR_HOST_URL} \
+                                -Dsonar.login=${SONAR_TOKEN} \
+                                -Dsonar.sources=Projects \
+                                -Dsonar.sourceEncoding=UTF-8 \
+                                -Dsonar.exclusions='**/build/**,**/node_modules/**,**/*.gradle' \
+                                -Dsonar.pullrequest.key=${CHANGE_ID} \
+                                -Dsonar.pullrequest.branch=${CHANGE_BRANCH} \
+                                -Dsonar.pullrequest.base=${CHANGE_TARGET}
+                        else
+                            echo "Running SonarQube scan for branch"
+                            sonar-scanner \
+                                -Dsonar.projectKey=${PROJECT_KEY} \
+                                -Dsonar.projectName="Java Projects Collections" \
+                                -Dsonar.host.url=${SONAR_HOST_URL} \
+                                -Dsonar.login=${SONAR_TOKEN} \
+                                -Dsonar.sources=Projects \
+                                -Dsonar.sourceEncoding=UTF-8 \
+                                -Dsonar.exclusions='**/build/**,**/node_modules/**,**/*.gradle'
+                        fi
                     '''
                 }
             }
         }
 
         stage('Quality Gate Check') {
-            when {
-                expression { env.CHANGE_ID != null }
-            }
             steps {
                 script {
                     timeout(time: 3, unit: 'MINUTES') {
@@ -126,30 +135,38 @@ pipeline {
         }
 
         stage('Report to GitHub') {
-            when {
-                expression { env.CHANGE_ID != null }
-            }
             steps {
                 script {
-                    def statusState = (env.QG_STATUS == 'OK') ? 'success' : 'failure'
-                    def statusDescription = (env.QG_STATUS == 'OK') ? 'Quality gate passed ✅' : "Quality gate failed (${env.QG_STATUS})"
-                    def targetUrl = "${env.SONAR_HOST_URL}/dashboard?id=${PROJECT_KEY}&pullRequest=${CHANGE_ID}"
-
-                    sh '''
-                        curl -X POST \
-                            -H "Authorization: token ${GITHUB_TOKEN}" \
-                            -H "Content-Type: application/json" \
-                            -H "Accept: application/vnd.github.v3+json" \
-                            -d '{
-                                "state": "''' + statusState + '''",
-                                "description": "''' + statusDescription + '''",
-                                "target_url": "''' + targetUrl + '''",
-                                "context": "Jenkins/SonarQube"
-                            }' \
-                            ${REPO_URL}/statuses/${COMMIT_HASH}
+                    if (env.CHANGE_ID != null) {
+                        echo "Posting status to GitHub PR: ${env.CHANGE_ID}"
                         
-                        echo "GitHub Status Posted: ${statusState}"
-                    '''
+                        def statusState = (env.QG_STATUS == 'OK') ? 'success' : 'failure'
+                        def statusDescription = (env.QG_STATUS == 'OK') ? 'Quality gate passed ✅' : "Quality gate failed (${env.QG_STATUS})"
+                        def targetUrl = "${env.SONAR_HOST_URL}/dashboard?id=${PROJECT_KEY}&pullRequest=${CHANGE_ID}"
+
+                        sh '''
+                            echo "GitHub Token: ${GITHUB_TOKEN}"
+                            echo "Commit: ${COMMIT_HASH}"
+                            echo "Repo URL: ${REPO_URL}"
+                            
+                            curl -v -X POST \
+                                -H "Authorization: token ${GITHUB_TOKEN}" \
+                                -H "Content-Type: application/json" \
+                                -H "Accept: application/vnd.github.v3+json" \
+                                -d '{
+                                    "state": "''' + statusState + '''",
+                                    "description": "''' + statusDescription + '''",
+                                    "target_url": "''' + targetUrl + '''",
+                                    "context": "Jenkins/SonarQube"
+                                }' \
+                                ${REPO_URL}/statuses/${COMMIT_HASH}
+                            
+                            echo ""
+                            echo "GitHub Status Posted: ${statusState}"
+                        '''
+                    } else {
+                        echo "Not a PR build, skipping GitHub status update"
+                    }
                 }
             }
         }
@@ -161,6 +178,7 @@ pipeline {
                 echo "=== Build Summary ==="
                 echo "Commit: ${COMMIT_HASH}"
                 echo "Branch: ${GIT_BRANCH}"
+                echo "PR ID: ${CHANGE_ID}"
                 echo "Quality Gate: ${QG_STATUS}"
                 echo "Workspace: ${WORKSPACE}"
             '''
@@ -170,7 +188,7 @@ pipeline {
             script {
                 if (env.CHANGE_ID != null) {
                     sh '''
-                        curl -X POST \
+                        curl -v -X POST \
                             -H "Authorization: token ${GITHUB_TOKEN}" \
                             -H "Content-Type: application/json" \
                             -H "Accept: application/vnd.github.v3+json" \
