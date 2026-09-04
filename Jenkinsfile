@@ -6,296 +6,160 @@ pipeline {
         SONAR_TOKEN = credentials('sonar-token')
         SONAR_HOST_URL = 'http://15.206.213.78:9000'
         PROJECT_KEY = 'java-projects-collections'
-        GIT_BRANCH = "${env.CHANGE_BRANCH ?: env.GIT_BRANCH}"
         SONAR_SCANNER_HOME = "${WORKSPACE}/sonar-scanner"
     }
 
     options {
-        timeout(time: 30, unit: 'MINUTES')
-        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 15, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '3'))
         disableConcurrentBuilds()
     }
 
     stages {
         stage('Checkout') {
             steps {
+                checkout scm
                 script {
-                    def t0 = System.currentTimeMillis()
-                    checkout scm
                     env.COMMIT_HASH = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
                     env.REPO_URL = sh(script: 'git config --get remote.origin.url | sed "s/.git//"', returnStdout: true).trim()
-                    env.IS_PR = (env.CHANGE_ID != null) ? 'true' : 'false'
-
-                    echo "Commit: ${env.COMMIT_HASH}"
-                    echo "Repo: ${env.REPO_URL}"
-                    echo "Is PR: ${env.IS_PR}"
-                    env.T_CHECKOUT = "${(System.currentTimeMillis() - t0) / 1000}"
-                    echo "STAGE TIME [Checkout]: ${env.T_CHECKOUT}s"
                 }
             }
         }
 
-        stage('Detect Changed Files') {
+        stage('Check PR Changes') {
             when {
                 expression { env.CHANGE_ID != null && env.CHANGE_ID != '' }
             }
             steps {
                 script {
-                    def t0 = System.currentTimeMillis()
-                    sh '''
-                        echo "=== Detecting Changed Files for PR ${CHANGE_ID} ==="
-                        
-                        git fetch origin ${CHANGE_TARGET}:${CHANGE_TARGET} 2>/dev/null || true
-                        
-                        CHANGED_FILES=$(git diff --name-only origin/${CHANGE_TARGET}...HEAD | grep -E '\\.(java|html|js|py|jsx|tsx|css|xml)$' | grep -v '.gradle' | grep -v '.DS_Store' | sort | uniq)
-                        
-                        CHANGED_COUNT=$(echo "$CHANGED_FILES" | grep -c '^' || echo 0)
-                        
-                        echo "Changed files:"
-                        echo "$CHANGED_FILES"
-                        echo "Total changed files: $CHANGED_COUNT"
-                        
-                        echo "$CHANGED_FILES" > /tmp/changed_files.txt
-                        echo "$CHANGED_COUNT" > /tmp/changed_count.txt
-                    '''
-                    env.T_DETECT = "${(System.currentTimeMillis() - t0) / 1000}"
-                    echo "STAGE TIME [Detect Changed Files]: ${env.T_DETECT}s"
+                    def changeCount = sh(
+                        script: '''
+                            git fetch origin ${CHANGE_TARGET} 2>/dev/null || true
+                            git diff --name-only origin/${CHANGE_TARGET}...HEAD | grep -E '\\.(java|html|js|py)$' | wc -l
+                        ''',
+                        returnStdout: true
+                    ).trim().toInteger()
+                    
+                    env.CHANGE_COUNT = changeCount.toString()
+                    echo "Changed files: ${env.CHANGE_COUNT}"
                 }
             }
         }
 
-        stage('Build Gradle Projects') {
-            when {
-                expression { env.IS_PR == 'false' }
-            }
+        stage('Download Scanner') {
             steps {
-                script {
-                    def t0 = System.currentTimeMillis()
-                    sh '''#!/bin/bash
-                        echo "=== Building Gradle Projects (Main Branch) ==="
-
-                        find Projects -name "build.gradle" -type f 2>/dev/null > /tmp/gradle_projects.txt
-
-                        if [ ! -s /tmp/gradle_projects.txt ]; then
-                            echo "No Gradle projects found, skipping build"
-                            exit 0
-                        fi
-
-                        build_count=0
-                        while IFS= read -r gradle_file; do
-                            project_dir=$(dirname "$gradle_file")
-                            echo "Building: $project_dir"
-                            build_count=$((build_count + 1))
-
-                            (
-                                cd "$project_dir" || exit 0
-                                if [ -f "gradlew" ]; then
-                                    chmod +x gradlew
-                                    timeout 240 ./gradlew clean build -x test --no-daemon --offline 2>&1 | tail -30
-                                else
-                                    echo "gradlew not found in $project_dir, skipping"
-                                fi
-                            )
-
-                            if [ $build_count -ge 2 ]; then
-                                echo "Built 2 projects, stopping to save time"
-                                break
-                            fi
-                        done < /tmp/gradle_projects.txt
-                    '''
-                    env.T_BUILD = "${(System.currentTimeMillis() - t0) / 1000}"
-                    echo "STAGE TIME [Build Gradle Projects]: ${env.T_BUILD}s"
-                }
-            }
-        }
-
-        stage('Download SonarQube Scanner') {
-            steps {
-                script {
-                    def t0 = System.currentTimeMillis()
-                    sh '''
-                        if [ ! -d "${SONAR_SCANNER_HOME}" ]; then
-                            mkdir -p ${WORKSPACE}
-                            cd ${WORKSPACE}
-                            wget -q https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-5.0.1.3006-linux.zip
-                            unzip -q sonar-scanner-cli-5.0.1.3006-linux.zip
-                            mv sonar-scanner-5.0.1.3006-linux ${SONAR_SCANNER_HOME}
-                            rm sonar-scanner-cli-5.0.1.3006-linux.zip
-                        fi
-                        ${SONAR_SCANNER_HOME}/bin/sonar-scanner --version
-                    '''
-                    env.T_DOWNLOAD = "${(System.currentTimeMillis() - t0) / 1000}"
-                    echo "STAGE TIME [Download SonarQube Scanner]: ${env.T_DOWNLOAD}s"
-                }
+                sh '''
+                    if [ ! -f "${SONAR_SCANNER_HOME}/bin/sonar-scanner" ]; then
+                        mkdir -p ${WORKSPACE}
+                        cd ${WORKSPACE}
+                        wget -q https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-5.0.1.3006-linux.zip
+                        unzip -q sonar-scanner-cli-5.0.1.3006-linux.zip
+                        mv sonar-scanner-5.0.1.3006-linux ${SONAR_SCANNER_HOME}
+                        rm sonar-scanner-cli-5.0.1.3006-linux.zip
+                    fi
+                '''
             }
         }
 
         stage('SonarQube Scan') {
-            steps {
-                script {
-                    def t0 = System.currentTimeMillis()
-                    timeout(time: 15, unit: 'MINUTES') {
-                        sh '''
-                            export PATH=${SONAR_SCANNER_HOME}/bin:$PATH
-
-                            BINARIES=$(find Projects -type d \\( -name "classes" -o -name "intermediates" \\) 2>/dev/null | tr '\\n' ',' | sed 's/,$//')
-
-                            if [ ! -z "${CHANGE_ID}" ]; then
-                                CHANGED_COUNT=$(cat /tmp/changed_count.txt 2>/dev/null || echo 0)
-                                
-                                if [ "$CHANGED_COUNT" -eq 0 ]; then
-                                    echo "=== No code files changed in PR ${CHANGE_ID} ==="
-                                    echo "Skipping SonarQube scan (no source files modified)"
-                                    echo "SKIP_SCAN=true" >> /tmp/scan_decision.txt
-                                    exit 0
-                                fi
-                                
-                                echo "=== Running INCREMENTAL SonarQube scan for PR ${CHANGE_ID} ==="
-                                CHANGED_FILES=$(cat /tmp/changed_files.txt | tr '\\n' ',' | sed 's/,$//')
-                                echo "Scanning $CHANGED_COUNT changed files"
-                                
-                                sonar-scanner \
-                                    -Dsonar.projectKey=${PROJECT_KEY} \
-                                    -Dsonar.projectName="Java Projects Collections" \
-                                    -Dsonar.host.url=${SONAR_HOST_URL} \
-                                    -Dsonar.token=${SONAR_TOKEN} \
-                                    -Dsonar.sources="$CHANGED_FILES" \
-                                    -Dsonar.sourceEncoding=UTF-8 \
-                                    -Dsonar.java.binaries="$BINARIES" \
-                                    -Dsonar.exclusions='**/build/**,**/node_modules/**,**/*.gradle,**/target/**,**/*.war,**/*.wav,.DS_Store,**/.gradle/**'
-                                
-                                echo "SKIP_SCAN=false" >> /tmp/scan_decision.txt
-                            else
-                                echo "=== Running FULL SonarQube scan (Main Branch) ==="
-                                sonar-scanner \
-                                    -Dsonar.projectKey=${PROJECT_KEY} \
-                                    -Dsonar.projectName="Java Projects Collections" \
-                                    -Dsonar.host.url=${SONAR_HOST_URL} \
-                                    -Dsonar.token=${SONAR_TOKEN} \
-                                    -Dsonar.sources=Projects \
-                                    -Dsonar.sourceEncoding=UTF-8 \
-                                    -Dsonar.java.binaries="$BINARIES" \
-                                    -Dsonar.exclusions='**/build/**,**/node_modules/**,**/*.gradle,**/target/**,**/*.war,**/*.wav,.DS_Store,**/.gradle/**'
-                                
-                                echo "SKIP_SCAN=false" >> /tmp/scan_decision.txt
-                            fi
-                        '''
+            when {
+                expression {
+                    if (env.CHANGE_ID != null && env.CHANGE_ID != '') {
+                        return env.CHANGE_COUNT.toInteger() > 0
                     }
-                    env.T_SCAN = "${(System.currentTimeMillis() - t0) / 1000}"
-                    echo "STAGE TIME [SonarQube Scan]: ${env.T_SCAN}s"
+                    return true
+                }
+            }
+            steps {
+                timeout(time: 10, unit: 'MINUTES') {
+                    sh '''
+                        export PATH=${SONAR_SCANNER_HOME}/bin:$PATH
+                        
+                        SOURCES="Projects"
+                        
+                        if [ ! -z "${CHANGE_ID}" ]; then
+                            SOURCES=$(git diff --name-only origin/${CHANGE_TARGET}...HEAD | grep -E '\\.(java|html|js|py)$' | tr '\\n' ',')
+                            SOURCES=$(echo "$SOURCES" | sed 's/,$//')
+                        fi
+                        
+                        sonar-scanner \
+                            -Dsonar.projectKey=${PROJECT_KEY} \
+                            -Dsonar.projectName="Java Projects Collections" \
+                            -Dsonar.host.url=${SONAR_HOST_URL} \
+                            -Dsonar.token=${SONAR_TOKEN} \
+                            -Dsonar.sources="$SOURCES" \
+                            -Dsonar.sourceEncoding=UTF-8 \
+                            -Dsonar.exclusions='**/build/**,**/node_modules/**,**/*.gradle,**/target/**'
+                    '''
                 }
             }
         }
 
-        stage('Quality Gate Check') {
+        stage('Quality Gate') {
             when {
-                expression { !fileExists('/tmp/scan_decision.txt') || !readFile('/tmp/scan_decision.txt').contains('SKIP_SCAN=true') }
+                expression {
+                    if (env.CHANGE_ID != null && env.CHANGE_ID != '') {
+                        return env.CHANGE_COUNT.toInteger() > 0
+                    }
+                    return true
+                }
             }
             steps {
-                script {
-                    def t0 = System.currentTimeMillis()
-                    timeout(time: 3, unit: 'MINUTES') {
+                timeout(time: 2, unit: 'MINUTES') {
+                    script {
                         def qgStatus = sh(
-                            script: '''#!/bin/bash
-                                final_status="TIMEOUT"
-
-                                for i in $(seq 1 18); do
-                                    echo "Checking Quality Gate (attempt $i/18)..." >&2
-
-                                    RESPONSE=$(curl -s -u ${SONAR_TOKEN}: \
-                                        "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}")
-
-                                    STATUS=$(echo "$RESPONSE" | grep -o '"status":"[^"]*' | cut -d'"' -f4)
-                                    echo "Status: ${STATUS:-<none>}" >&2
-
+                            script: '''
+                                for i in {1..12}; do
+                                    STATUS=$(curl -s -u ${SONAR_TOKEN}: "${SONAR_HOST_URL}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}" | grep -o '"status":"[A-Z]*' | cut -d'"' -f4)
                                     if [ "$STATUS" = "OK" ] || [ "$STATUS" = "ERROR" ]; then
-                                        final_status="$STATUS"
-                                        break
+                                        echo "$STATUS"
+                                        exit 0
                                     fi
-
                                     sleep 10
                                 done
-
-                                echo "$final_status"
+                                echo "TIMEOUT"
                             ''',
                             returnStdout: true
                         ).trim()
-
                         env.QG_STATUS = qgStatus
-                        echo "Quality Gate Status: ${env.QG_STATUS}"
                     }
-                    env.T_QG = "${(System.currentTimeMillis() - t0) / 1000}"
-                    echo "STAGE TIME [Quality Gate Check]: ${env.T_QG}s"
                 }
             }
         }
 
-        stage('Report to GitHub') {
+        stage('GitHub Status') {
+            when {
+                expression { env.CHANGE_ID != null && env.CHANGE_ID != '' }
+            }
             steps {
                 script {
-                    def t0 = System.currentTimeMillis()
-                    if (env.CHANGE_ID != null && env.CHANGE_ID != '') {
-                        sh '''
-                            SKIP_SCAN=$(cat /tmp/scan_decision.txt 2>/dev/null | grep 'SKIP_SCAN=true' || echo "")
-                            
-                            if [ ! -z "$SKIP_SCAN" ]; then
-                                echo "No code changes detected - PR passes automatically"
-                                STATE="success"
-                                DESC="No code changes detected"
-                            else
-                                if [ "${QG_STATUS}" = "OK" ]; then
-                                    STATE="success"
-                                    DESC="Quality gate passed"
-                                else
-                                    STATE="failure"
-                                    DESC="Quality gate failed (${QG_STATUS})"
-                                fi
-                            fi
-                            
-                            curl -X POST \
-                                -H "Authorization: token ${GITHUB_TOKEN}" \
-                                -H "Content-Type: application/json" \
-                                -H "Accept: application/vnd.github.v3+json" \
-                                -d "{
-                                    \"state\": \"$STATE\",
-                                    \"description\": \"$DESC\",
-                                    \"target_url\": \"${SONAR_HOST_URL}/dashboard?id=${PROJECT_KEY}\",
-                                    \"context\": \"Jenkins/SonarQube\"
-                                }" \
-                                ${REPO_URL}/statuses/${COMMIT_HASH}
-                            
-                            echo "GitHub Status Posted: $STATE - $DESC"
-                        '''
+                    def state
+                    def desc
+                    
+                    if (env.CHANGE_COUNT.toInteger() == 0) {
+                        state = "success"
+                        desc = "No code changes"
+                    } else if (env.QG_STATUS == "OK") {
+                        state = "success"
+                        desc = "Quality gate passed"
                     } else {
-                        echo "Not a PR build - no GitHub status update needed"
+                        state = "failure"
+                        desc = "Quality gate failed"
                     }
-                    env.T_REPORT = "${(System.currentTimeMillis() - t0) / 1000}"
-                    echo "STAGE TIME [Report to GitHub]: ${env.T_REPORT}s"
+                    
+                    sh '''
+                        curl -X POST \
+                            -H "Authorization: token ${GITHUB_TOKEN}" \
+                            -H "Content-Type: application/json" \
+                            -d '{"state":"''' + state + '''","description":"''' + desc + '''","target_url":"${SONAR_HOST_URL}/dashboard?id=${PROJECT_KEY}","context":"Jenkins/SonarQube"}' \
+                            ${REPO_URL}/statuses/${COMMIT_HASH}
+                    '''
                 }
             }
         }
     }
 
     post {
-        always {
-            sh '''
-                echo "=== Build Summary ==="
-                echo "Commit: ${COMMIT_HASH}"
-                echo "Branch: ${GIT_BRANCH}"
-                echo "PR ID: ${CHANGE_ID:-'NOT SET'}"
-                echo "Quality Gate: ${QG_STATUS:-'SKIPPED'}"
-                echo ""
-                echo "=== Stage Times ==="
-                echo "Checkout:               ${T_CHECKOUT:-N/A}s"
-                echo "Detect Changed Files:   ${T_DETECT:-N/A}s"
-                echo "Build:                  ${T_BUILD:-N/A}s"
-                echo "Download Scanner:       ${T_DOWNLOAD:-N/A}s"
-                echo "SonarQube Scan:         ${T_SCAN:-N/A}s"
-                echo "Quality Gate Check:     ${T_QG:-N/A}s"
-                echo "Report to GitHub:       ${T_REPORT:-N/A}s"
-            '''
-        }
-
         failure {
             script {
                 if (env.CHANGE_ID != null && env.CHANGE_ID != '') {
@@ -303,13 +167,7 @@ pipeline {
                         curl -X POST \
                             -H "Authorization: token ${GITHUB_TOKEN}" \
                             -H "Content-Type: application/json" \
-                            -H "Accept: application/vnd.github.v3+json" \
-                            -d '{
-                                "state": "error",
-                                "description": "Pipeline failed",
-                                "target_url": "${BUILD_URL}",
-                                "context": "Jenkins/Pipeline"
-                            }' \
+                            -d '{"state":"error","description":"Pipeline failed","target_url":"${BUILD_URL}","context":"Jenkins/Pipeline"}' \
                             ${REPO_URL}/statuses/${COMMIT_HASH}
                     '''
                 }
