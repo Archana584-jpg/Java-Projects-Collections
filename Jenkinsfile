@@ -38,6 +38,38 @@ pipeline {
             }
         }
 
+        stage('Detect Changed Files') {
+            when {
+                expression { env.CHANGE_ID != null && env.CHANGE_ID != '' }
+            }
+            steps {
+                script {
+                    def t0 = System.currentTimeMillis()
+                    sh '''
+                        echo "=== Detecting Changed Files for PR ${CHANGE_ID} ==="
+                        
+                        # Fetch base branch if needed
+                        git fetch origin ${CHANGE_TARGET}:${CHANGE_TARGET} 2>/dev/null || true
+                        
+                        # Get list of changed Java, HTML, JS, Python files
+                        CHANGED_FILES=$(git diff --name-only origin/${CHANGE_TARGET}...HEAD | grep -E '\\.(java|html|js|py|jsx|tsx|css|xml)$' | grep -v '.gradle' | grep -v '.DS_Store' | sort | uniq)
+                        
+                        echo "Changed files:"
+                        echo "$CHANGED_FILES"
+                        
+                        # Count changed files
+                        CHANGED_COUNT=$(echo "$CHANGED_FILES" | grep -c '^' || echo 0)
+                        echo "Total changed files: $CHANGED_COUNT"
+                        
+                        # Save to file for next stage
+                        echo "$CHANGED_FILES" > /tmp/changed_files.txt
+                    '''
+                    env.T_DETECT = "${(System.currentTimeMillis() - t0) / 1000}"
+                    echo "STAGE TIME [Detect Changed Files]: ${env.T_DETECT}s"
+                }
+            }
+        }
+
         stage('Build Gradle Projects') {
             steps {
                 script {
@@ -70,7 +102,7 @@ pipeline {
                                     end_ts=$(date +%s)
                                     echo "gradlew for $project_dir took $((end_ts - start_ts))s (exit $gradle_rc)"
                                     if [ $gradle_rc -ne 0 ]; then
-                                        echo "NOTE: gradlew failed or timed out for $project_dir (likely --offline cache miss or dependency issue), continuing..."
+                                        echo "NOTE: gradlew failed or timed out for $project_dir, continuing..."
                                     fi
                                 else
                                     echo "gradlew not found in $project_dir, skipping"
@@ -112,51 +144,51 @@ pipeline {
             }
         }
 
-        stage('List Projects') {
-            steps {
-                script {
-                    def t0 = System.currentTimeMillis()
-                    sh '''
-                        echo "=== Found Gradle Projects ==="
-                        find Projects -name "build.gradle" -type f 2>/dev/null | sort
-                        echo ""
-                        echo "=== Java Files Count ==="
-                        find Projects -name "*.java" -type f 2>/dev/null | wc -l
-                        echo ""
-                        echo "=== Compiled Classes ==="
-                        find Projects -name "*.class" -type f 2>/dev/null | wc -l
-                    '''
-                    env.T_LIST = "${(System.currentTimeMillis() - t0) / 1000}"
-                    echo "STAGE TIME [List Projects]: ${env.T_LIST}s"
-                }
-            }
-        }
-
         stage('SonarQube Scan') {
             steps {
                 script {
                     def t0 = System.currentTimeMillis()
-                    sh '''
-                        export PATH=${SONAR_SCANNER_HOME}/bin:$PATH
+                    timeout(time: 15, unit: 'MINUTES') {
+                        sh '''
+                            export PATH=${SONAR_SCANNER_HOME}/bin:$PATH
 
-                        BINARIES=$(find Projects -type d \\( -name "classes" -o -name "intermediates" \\) 2>/dev/null | tr '\\n' ',' | sed 's/,$//')
+                            BINARIES=$(find Projects -type d \\( -name "classes" -o -name "intermediates" \\) 2>/dev/null | tr '\\n' ',' | sed 's/,$//')
 
-                        echo "Found binaries: $BINARIES"
-                        echo "CHANGE_ID: '${CHANGE_ID}'"
-                        echo "CHANGE_BRANCH: '${CHANGE_BRANCH}'"
-                        echo "CHANGE_TARGET: '${CHANGE_TARGET}'"
-
-                        echo "=== Running SonarQube scan (Community Edition) ==="
-                        sonar-scanner \
-                            -Dsonar.projectKey=${PROJECT_KEY} \
-                            -Dsonar.projectName="Java Projects Collections" \
-                            -Dsonar.host.url=${SONAR_HOST_URL} \
-                            -Dsonar.token=${SONAR_TOKEN} \
-                            -Dsonar.sources=Projects \
-                            -Dsonar.sourceEncoding=UTF-8 \
-                            -Dsonar.java.binaries="$BINARIES" \
-                            -Dsonar.exclusions='**/build/**,**/node_modules/**,**/*.gradle,**/target/**,**/*.war,**/*.wav'
-                    '''
+                            if [ ! -z "${CHANGE_ID}" ] && [ -f /tmp/changed_files.txt ]; then
+                                echo "=== Running INCREMENTAL SonarQube scan for PR ${CHANGE_ID} ==="
+                                CHANGED_FILES=$(cat /tmp/changed_files.txt | tr '\\n' ',' | sed 's/,$//')
+                                
+                                if [ -z "$CHANGED_FILES" ]; then
+                                    echo "No source files changed, skipping scan"
+                                    exit 0
+                                fi
+                                
+                                echo "Scanning only changed files:"
+                                echo "$CHANGED_FILES"
+                                
+                                sonar-scanner \
+                                    -Dsonar.projectKey=${PROJECT_KEY} \
+                                    -Dsonar.projectName="Java Projects Collections" \
+                                    -Dsonar.host.url=${SONAR_HOST_URL} \
+                                    -Dsonar.token=${SONAR_TOKEN} \
+                                    -Dsonar.sources="$CHANGED_FILES" \
+                                    -Dsonar.sourceEncoding=UTF-8 \
+                                    -Dsonar.java.binaries="$BINARIES" \
+                                    -Dsonar.exclusions='**/build/**,**/node_modules/**,**/*.gradle,**/target/**,**/*.war,**/*.wav,.DS_Store,**/.gradle/**'
+                            else
+                                echo "=== Running FULL SonarQube scan (main branch) ==="
+                                sonar-scanner \
+                                    -Dsonar.projectKey=${PROJECT_KEY} \
+                                    -Dsonar.projectName="Java Projects Collections" \
+                                    -Dsonar.host.url=${SONAR_HOST_URL} \
+                                    -Dsonar.token=${SONAR_TOKEN} \
+                                    -Dsonar.sources=Projects \
+                                    -Dsonar.sourceEncoding=UTF-8 \
+                                    -Dsonar.java.binaries="$BINARIES" \
+                                    -Dsonar.exclusions='**/build/**,**/node_modules/**,**/*.gradle,**/target/**,**/*.war,**/*.wav,.DS_Store,**/.gradle/**'
+                            fi
+                        '''
+                    }
                     env.T_SCAN = "${(System.currentTimeMillis() - t0) / 1000}"
                     echo "STAGE TIME [SonarQube Scan]: ${env.T_SCAN}s"
                 }
@@ -255,9 +287,9 @@ pipeline {
                 echo ""
                 echo "=== STAGE TIMING BREAKDOWN ==="
                 echo "Checkout:               ${T_CHECKOUT:-N/A}s"
+                echo "Detect Changed Files:   ${T_DETECT:-N/A}s"
                 echo "Build Gradle Projects:  ${T_BUILD:-N/A}s"
                 echo "Download Scanner:       ${T_DOWNLOAD:-N/A}s"
-                echo "List Projects:          ${T_LIST:-N/A}s"
                 echo "SonarQube Scan:         ${T_SCAN:-N/A}s"
                 echo "Quality Gate Check:     ${T_QG:-N/A}s"
                 echo "Report to GitHub:       ${T_REPORT:-N/A}s"
