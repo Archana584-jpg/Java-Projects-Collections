@@ -35,14 +35,14 @@ pipeline {
                     echo "════════════════════════════════════"
                     
                     sh '''
-                        echo "Fetching ${TARGET_BRANCH}..."
-                        git fetch origin ${TARGET_BRANCH} --quiet 2>&1 || true
+                        echo "Fetching ${CHANGE_TARGET}..."
+                        git fetch origin ${CHANGE_TARGET} --quiet 2>&1 || true
                     '''
                     
-                    // Get all changed files
+                    // Get all changed files - TWO DOTS (not three)
                     def allFiles = sh(
                         script: """
-                            git diff --name-only origin/${env.TARGET_BRANCH}..HEAD 2>/dev/null || echo ""
+                            git diff --name-only origin/${env.CHANGE_TARGET}..HEAD 2>/dev/null || echo ""
                         """,
                         returnStdout: true
                     ).trim().split('\n').findAll { it.trim() }
@@ -55,40 +55,44 @@ pipeline {
                     }
                     
                     // Get code files only
-                    def codeFiles = allFiles.findAll { it =~ /\.(java|js|py|html|css|xml|properties|gradle|maven)$/ && it.trim() != '' }
+                    def codeFiles = allFiles.findAll { it =~ /\.(java|js|py|html|css|xml|properties|gradle)$/ && it.trim() != '' }
                     
                     echo ""
-                    echo "💻 CODE FILES CHANGED (${codeFiles.size()}):"
+                    echo "💻 CODE FILES (${codeFiles.size()}):"
                     echo "════════════════════════════════════"
                     if (codeFiles.size() > 0) {
                         codeFiles.each { f ->
                             echo "  ✓ $f"
                         }
                     } else {
-                        echo "  (No code files changed - only config/docs)"
+                        echo "  (No code files changed)"
                     }
                     
-                    // Show actual diff
+                    // Show diff stats
                     echo ""
-                    echo "📊 DETAILED CHANGES:"
+                    echo "📊 SUMMARY:"
                     echo "════════════════════════════════════"
                     sh '''
-                        git diff --stat origin/${TARGET_BRANCH}..HEAD || true
+                        git diff --stat origin/${CHANGE_TARGET}..HEAD || true
                     '''
                     
-                    echo ""
-                    echo "📄 FILE-BY-FILE CHANGES:"
-                    echo "════════════════════════════════════"
-                    codeFiles.each { f ->
-                        echo ""
-                        echo "FILE: $f"
-                        echo "───────────────────────────────────"
-                        sh """
-                            git diff origin/${env.TARGET_BRANCH}..HEAD -- "$f" | head -50 || true
-                        """
-                    }
-                    
                     env.CODE_FILES_COUNT = codeFiles.size().toString()
+                }
+            }
+        }
+
+        stage('Show Changes') {
+            when {
+                expression { env.BUILD_TYPE == 'PR' && env.CODE_FILES_COUNT != '0' }
+            }
+            steps {
+                script {
+                    echo ""
+                    echo "📄 DETAILED CHANGES:"
+                    echo "════════════════════════════════════"
+                    sh '''
+                        git diff origin/${CHANGE_TARGET}..HEAD --no-color
+                    '''
                 }
             }
         }
@@ -104,7 +108,7 @@ pipeline {
                     echo "SUMMARY"
                     echo "════════════════════════════════════"
                     echo "PR: #${PR_NUMBER}"
-                    echo "Target: ${TARGET_BRANCH}"
+                    echo "Target: ${CHANGE_TARGET}"
                     echo "Code Files Changed: ${CODE_FILES_COUNT}"
                     echo "════════════════════════════════════"
                 }
