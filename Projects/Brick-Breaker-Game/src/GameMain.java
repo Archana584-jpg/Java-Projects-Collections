@@ -33,3 +33,4 @@ public class SonarQubeTest {
         return total;
     }
 }
+// test comment
