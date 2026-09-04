@@ -1,7 +1,6 @@
 pipeline {
     agent any
 
-
     environment {
         GITHUB_TOKEN = credentials('archana-sonar')
         SONAR_TOKEN = credentials('sonar-token')
@@ -140,7 +139,6 @@ pipeline {
                     sh '''
                         export PATH=${SONAR_SCANNER_HOME}/bin:$PATH
 
-                        # Find all build directories for binaries
                         BINARIES=$(find Projects -type d \\( -name "classes" -o -name "intermediates" \\) 2>/dev/null | tr '\\n' ',' | sed 's/,$//')
 
                         echo "Found binaries: $BINARIES"
@@ -148,32 +146,16 @@ pipeline {
                         echo "CHANGE_BRANCH: '${CHANGE_BRANCH}'"
                         echo "CHANGE_TARGET: '${CHANGE_TARGET}'"
 
-                        if [ ! -z "${CHANGE_ID}" ] && [ ! -z "${CHANGE_BRANCH}" ]; then
-                            echo "=== Running SonarQube scan for PR ${CHANGE_ID} ==="
-                            sonar-scanner \
-                                -Dsonar.projectKey=${PROJECT_KEY} \
-                                -Dsonar.projectName="Java Projects Collections" \
-                                -Dsonar.host.url=${SONAR_HOST_URL} \
-                                -Dsonar.token=${SONAR_TOKEN} \
-                                -Dsonar.sources=Projects \
-                                -Dsonar.sourceEncoding=UTF-8 \
-                                -Dsonar.java.binaries="$BINARIES" \
-                                -Dsonar.exclusions='**/build/**,**/node_modules/**,**/*.gradle,**/target/**,**/*.war,**/*.wav' \
-                                -Dsonar.pullrequest.key=${CHANGE_ID} \
-                                -Dsonar.pullrequest.branch=${CHANGE_BRANCH} \
-                                -Dsonar.pullrequest.base=${CHANGE_TARGET}
-                        else
-                            echo "=== Running SonarQube scan for branch ==="
-                            sonar-scanner \
-                                -Dsonar.projectKey=${PROJECT_KEY} \
-                                -Dsonar.projectName="Java Projects Collections" \
-                                -Dsonar.host.url=${SONAR_HOST_URL} \
-                                -Dsonar.token=${SONAR_TOKEN} \
-                                -Dsonar.sources=Projects \
-                                -Dsonar.sourceEncoding=UTF-8 \
-                                -Dsonar.java.binaries="$BINARIES" \
-                                -Dsonar.exclusions='**/build/**,**/node_modules/**,**/*.gradle,**/target/**,**/*.war,**/*.wav'
-                        fi
+                        echo "=== Running SonarQube scan (Community Edition) ==="
+                        sonar-scanner \
+                            -Dsonar.projectKey=${PROJECT_KEY} \
+                            -Dsonar.projectName="Java Projects Collections" \
+                            -Dsonar.host.url=${SONAR_HOST_URL} \
+                            -Dsonar.token=${SONAR_TOKEN} \
+                            -Dsonar.sources=Projects \
+                            -Dsonar.sourceEncoding=UTF-8 \
+                            -Dsonar.java.binaries="$BINARIES" \
+                            -Dsonar.exclusions='**/build/**,**/node_modules/**,**/*.gradle,**/target/**,**/*.war,**/*.wav'
                     '''
                     env.T_SCAN = "${(System.currentTimeMillis() - t0) / 1000}"
                     echo "STAGE TIME [SonarQube Scan]: ${env.T_SCAN}s"
@@ -199,9 +181,6 @@ pipeline {
                                     STATUS=$(echo "$RESPONSE" | grep -o '"status":"[^"]*' | cut -d'"' -f4)
                                     echo "Status: ${STATUS:-<none>}" >&2
 
-                                    # OK / ERROR are terminal. NONE and IN_REVIEW mean
-                                    # the SonarQube background task hasn't finished
-                                    # processing the report yet -- keep polling.
                                     if [ "$STATUS" = "OK" ] || [ "$STATUS" = "ERROR" ]; then
                                         final_status="$STATUS"
                                         break
@@ -233,7 +212,7 @@ pipeline {
 
                         def statusState = (env.QG_STATUS == 'OK') ? 'success' : 'failure'
                         def statusDescription = (env.QG_STATUS == 'OK') ? 'Quality gate passed' : "Quality gate failed (${env.QG_STATUS})"
-                        def targetUrl = "${env.SONAR_HOST_URL}/dashboard?id=${PROJECT_KEY}&pullRequest=${env.CHANGE_ID}"
+                        def targetUrl = "${env.SONAR_HOST_URL}/dashboard?id=${PROJECT_KEY}"
 
                         sh '''
                             echo "=== Posting to GitHub ==="
