@@ -24,11 +24,10 @@ pipeline {
                     echo "Detecting Build Type"
                     echo "════════════════════════════════════"
                     
-                    // Parse repo owner/name from URL using simple string methods (no regex)
+                    // Parse repo owner/name from URL
                     def repoUrl = sh(script: 'git config --get remote.origin.url', returnStdout: true).trim()
                     repoUrl = repoUrl.replaceAll('\\.git$', '')
                     
-                    // Extract owner and repo from URL
                     def owner, repo
                     if (repoUrl.contains('github.com/')) {
                         def parts = repoUrl.split('github.com/')[1].split('/')
@@ -62,32 +61,38 @@ pipeline {
                         echo "Branch push detected: ${BRANCH_NAME}"
                         echo "Checking GitHub for open PR on this branch..."
                         
+                        // Use Groovy to parse JSON (no jq needed)
                         def prResponse = sh(
                             script: '''
                                 curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
-                                    "${GITHUB_API_REPO}/pulls?state=open&head=${GITHUB_REPO}:${BRANCH_NAME}" | \
-                                    jq -r '.[] | select(.state=="open") | .number' | head -1
+                                    "${GITHUB_API_REPO}/pulls?state=open&head=${GITHUB_REPO}:${BRANCH_NAME}"
                             ''',
                             returnStdout: true
                         ).trim()
                         
-                        if (prResponse && prResponse != 'null' && prResponse != '') {
+                        echo "GitHub API Response: ${prResponse}"
+                        
+                        // Parse JSON using Groovy (no external tools needed)
+                        def prNumber = null
+                        def prBase = null
+                        
+                        try {
+                            def parsed = new groovy.json.JsonSlurper().parseText(prResponse)
+                            if (parsed instanceof List && parsed.size() > 0) {
+                                prNumber = parsed[0].number.toString()
+                                prBase = parsed[0].base.ref
+                                echo "Found PR: #${prNumber} targeting ${prBase}"
+                            }
+                        } catch (Exception e) {
+                            echo "Could not parse GitHub response: ${e.message}"
+                        }
+                        
+                        if (prNumber && prNumber != 'null' && prNumber != '') {
                             // Found open PR for this branch
                             env.BUILD_TYPE = 'PR'
-                            env.PR_NUMBER = prResponse
+                            env.PR_NUMBER = prNumber
                             env.SONAR_PR_KEY = "${SONAR_BASE_KEY}-pr-${PR_NUMBER}"
-                            
-                            // Get PR details to find target branch
-                            def prDetails = sh(
-                                script: '''
-                                    curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
-                                        "${GITHUB_API_REPO}/pulls/${PR_NUMBER}" | \
-                                        jq -r '.base.ref'
-                                ''',
-                                returnStdout: true
-                            ).trim()
-                            
-                            env.TARGET_BRANCH = prDetails ?: 'main'
+                            env.TARGET_BRANCH = prBase ?: 'main'
                             env.CHANGE_TARGET = env.TARGET_BRANCH
                             
                             echo "✓ Found open PR: PR-${PR_NUMBER}"
@@ -239,7 +244,10 @@ pipeline {
                 script {
                     echo "ℹ This is a branch push with no open PR"
                     echo "ℹ Skipping PR-specific scanning"
-                    echo "ℹ To enable scanning, open a PR for branch: ${BRANCH_NAME}"
+                    echo "ℹ To enable scanning:"
+                    echo "  1. Go to GitHub"
+                    echo "  2. Open PR from branch: ${BRANCH_NAME}"
+                    echo "  3. Push commit again to trigger PR build"
                 }
             }
         }
