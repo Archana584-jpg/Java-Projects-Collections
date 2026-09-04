@@ -125,3 +125,8 @@ public class Convert extends HttpServlet {
         return "Short description";
     }// </editor-fold>
 }
+// Test code for quality gate scanning
+public void testMethod() {
+    System.out.println("test");
+    System.out.println("test");
+}

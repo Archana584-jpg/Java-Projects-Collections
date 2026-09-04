@@ -7,6 +7,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.Random;
 
+
 /**
  * A utility class for evaluating the strength of passwords
  * and suggesting new secure passwords if needed.
