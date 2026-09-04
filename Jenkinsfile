@@ -43,13 +43,23 @@ pipeline {
                     env.GITHUB_REPO = "${owner}/${repo}"
                     env.GITHUB_API_REPO = "${GITHUB_API}/repos/${owner}/${repo}"
                     
+                    echo "Repo: ${env.GITHUB_REPO}"
+                    
+                    // Check if this is a PR build or branch push
                     if (env.CHANGE_ID != null && env.CHANGE_ID != '') {
+                        // Native PR build in Jenkins
                         env.BUILD_TYPE = 'PR'
                         env.PR_NUMBER = env.CHANGE_ID
                         env.TARGET_BRANCH = env.CHANGE_TARGET
                         env.SONAR_PR_KEY = "${SONAR_BASE_KEY}-pr-${PR_NUMBER}"
-                        echo "✓ PR detected: PR-${PR_NUMBER} → ${TARGET_BRANCH}"
+                        echo "✓ PR detected (Jenkins native): PR-${PR_NUMBER}"
+                        echo "  Target: ${TARGET_BRANCH}"
                     } else {
+                        // Branch push - check for open PR on GitHub
+                        echo "Branch push detected: ${BRANCH_NAME}"
+                        echo "Checking GitHub for open PR on this branch..."
+                        
+                        // FIX: Added quotes around Authorization header
                         def prResponse = sh(
                             script: '''
                                 curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
@@ -57,6 +67,8 @@ pipeline {
                             ''',
                             returnStdout: true
                         ).trim()
+                        
+                        echo "GitHub API Response: ${prResponse}"
                         
                         def prNumber = null
                         def prBase = null
@@ -66,26 +78,34 @@ pipeline {
                             if (parsed instanceof List && parsed.size() > 0) {
                                 prNumber = parsed[0].number.toString()
                                 prBase = parsed[0].base.ref
+                                echo "Found PR: #${prNumber} targeting ${prBase}"
                             }
                         } catch (Exception e) {
-                            echo "Could not parse GitHub response"
+                            echo "Could not parse GitHub response: ${e.message}"
                         }
                         
-                        if (prNumber && prNumber != 'null') {
+                        if (prNumber && prNumber != 'null' && prNumber != '') {
+                            // Found open PR
                             env.BUILD_TYPE = 'PR'
                             env.PR_NUMBER = prNumber
                             env.SONAR_PR_KEY = "${SONAR_BASE_KEY}-pr-${PR_NUMBER}"
                             env.TARGET_BRANCH = prBase ?: 'main'
                             env.CHANGE_TARGET = env.TARGET_BRANCH
-                            echo "✓ Found PR: PR-${PR_NUMBER} → ${TARGET_BRANCH}"
+                            
+                            echo "✓ Found open PR: PR-${PR_NUMBER}"
+                            echo "  Target: ${TARGET_BRANCH}"
                         } else {
+                            // No open PR
                             env.BUILD_TYPE = 'BRANCH'
                             env.SONAR_PR_KEY = "${SONAR_BASE_KEY}-${BRANCH_NAME}".replaceAll('/', '-')
-                            echo "ℹ Branch push (no PR)"
+                            echo "ℹ Branch push with no open PR"
+                            echo "  To trigger PR scanning, open a PR for this branch"
                         }
                     }
                     
+                    echo "════════════════════════════════════"
                     echo "Build Type: ${env.BUILD_TYPE}"
+                    echo "PR Number: ${env.PR_NUMBER ?: 'N/A'}"
                     echo "SonarQube Key: ${env.SONAR_PR_KEY}"
                     echo "════════════════════════════════════"
                 }
@@ -97,6 +117,7 @@ pipeline {
                 checkout scm
                 script {
                     env.COMMIT_HASH = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+                    
                     def repoUrl = sh(script: 'git config --get remote.origin.url', returnStdout: true).trim()
                     repoUrl = repoUrl.replaceAll('\\.git$', '')
                     
@@ -121,16 +142,21 @@ pipeline {
             steps {
                 script {
                     try {
-                        echo "Detecting changed files..."
+                        echo "════════════════════════════════════"
+                        echo "Detecting Changed Files"
+                        echo "════════════════════════════════════"
                         
                         def targetBranch = env.TARGET_BRANCH ?: 'main'
+                        echo "Target branch: ${targetBranch}"
+                        echo "Current branch: ${BRANCH_NAME}"
                         
+                        // Fetch target branch
                         sh '''
-                            echo "Fetching ${TARGET_BRANCH}..."
+                            echo "Fetching origin/${TARGET_BRANCH}..."
                             git fetch origin ${TARGET_BRANCH} --quiet 2>&1 || true
                         '''
                         
-                        // Use TWO DOTS (not three) - this is the fix!
+                        // Use TWO DOTS (not three)
                         def changedFiles = sh(
                             script: """
                                 git diff --name-only origin/${targetBranch}..HEAD 2>/dev/null | sort | uniq
@@ -140,7 +166,7 @@ pipeline {
                         
                         echo "All files changed:"
                         changedFiles.each { f ->
-                            echo "  - $f"
+                            echo "  - ${f}"
                         }
                         
                         // Filter for source files only
@@ -149,15 +175,18 @@ pipeline {
                         }
                         
                         env.CHANGE_COUNT = sourceFiles.size().toString()
-                        echo "✓ Source files: ${env.CHANGE_COUNT}"
+                        echo "✓ Source files changed: ${env.CHANGE_COUNT}"
                         
                         if (sourceFiles.size() > 0) {
                             env.CHANGED_FILES = sourceFiles.join(',')
-                            sourceFiles.each { f -> echo "  ✓ $f" }
+                            echo "Files to scan:"
+                            sourceFiles.each { f -> echo "  ✓ ${f}" }
                         }
                         
+                        echo "════════════════════════════════════"
+                        
                     } catch (Exception e) {
-                        echo "Error: ${e.message}"
+                        echo "⚠ Error detecting changes: ${e.message}"
                         env.CHANGE_COUNT = '0'
                     }
                 }
@@ -175,12 +204,28 @@ pipeline {
                         -H "Content-Type: application/json" \
                         -d '{"state":"success","description":"No code changes","target_url":"","context":"Jenkins/SonarQube"}' \
                         "${REPO_URL}/statuses/${COMMIT_HASH}"
-                    echo "Status posted: No changes"
+                    echo "✓ GitHub status posted: No changes"
                 '''
             }
         }
 
-        stage('Download Scanner') {
+        stage('Branch Without PR') {
+            when {
+                expression { env.BUILD_TYPE == 'BRANCH' }
+            }
+            steps {
+                script {
+                    echo "ℹ This is a branch push with no open PR"
+                    echo "ℹ Skipping PR-specific scanning"
+                    echo "ℹ To enable scanning:"
+                    echo "  1. Go to GitHub"
+                    echo "  2. Open PR from branch: ${BRANCH_NAME}"
+                    echo "  3. Push commit again to trigger PR build"
+                }
+            }
+        }
+
+        stage('Download SonarQube Scanner') {
             when {
                 expression { env.BUILD_TYPE == 'PR' && env.CHANGE_COUNT != '0' }
             }
@@ -189,17 +234,20 @@ pipeline {
                     if [ ! -f "${SONAR_SCANNER_HOME}/bin/sonar-scanner" ]; then
                         mkdir -p ${WORKSPACE}
                         cd ${WORKSPACE}
+                        echo "Downloading SonarQube Scanner..."
                         wget -q https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-5.0.1.3006-linux.zip
                         unzip -q sonar-scanner-cli-5.0.1.3006-linux.zip
                         mv sonar-scanner-5.0.1.3006-linux ${SONAR_SCANNER_HOME}
                         rm sonar-scanner-cli-5.0.1.3006-linux.zip
+                        echo "✓ Scanner ready"
+                    else
+                        echo "✓ Scanner already cached"
                     fi
-                    echo "Scanner ready"
                 '''
             }
         }
 
-        stage('Create SonarQube Project') {
+        stage('Create SonarQube Temp Project') {
             when {
                 expression { env.BUILD_TYPE == 'PR' && env.CHANGE_COUNT != '0' }
             }
@@ -207,12 +255,13 @@ pipeline {
                 sh '''
                     EXISTS=$(curl -s -u "${SONAR_TOKEN}:" "${SONAR_HOST_URL}/api/projects/search?projects=${SONAR_PR_KEY}" | grep -c '"key"' || echo 0)
                     if [ "$EXISTS" -eq 0 ]; then
+                        echo "Creating SonarQube project: ${SONAR_PR_KEY}"
                         curl -s -X POST -u "${SONAR_TOKEN}:" \
                             -d "project=${SONAR_PR_KEY}&name=${SONAR_PR_KEY}" \
                             "${SONAR_HOST_URL}/api/projects/create"
-                        echo "Project created: ${SONAR_PR_KEY}"
+                        echo "✓ Project created"
                     else
-                        echo "Project exists: ${SONAR_PR_KEY}"
+                        echo "✓ Project already exists"
                     fi
                 '''
             }
@@ -226,26 +275,42 @@ pipeline {
                 timeout(time: 10, unit: 'MINUTES') {
                     sh '''
                         export PATH=${SONAR_SCANNER_HOME}/bin:$PATH
+                        
+                        SOURCES="${CHANGED_FILES}"
+                        if [ -z "$SOURCES" ]; then
+                            SOURCES="Projects"
+                        fi
+                        
+                        echo "════════════════════════════════════"
+                        echo "SonarQube Scan"
+                        echo "════════════════════════════════════"
+                        echo "Project: ${SONAR_PR_KEY}"
+                        echo "Sources: $SOURCES"
+                        echo "════════════════════════════════════"
+                        
                         sonar-scanner \
                             -Dsonar.projectKey="${SONAR_PR_KEY}" \
                             -Dsonar.projectName="${SONAR_PR_KEY}" \
                             -Dsonar.host.url="${SONAR_HOST_URL}" \
                             -Dsonar.token="${SONAR_TOKEN}" \
-                            -Dsonar.sources="Projects" \
-                            -Dsonar.exclusions='**/build/**,**/target/**'
-                        echo "Scan submitted"
+                            -Dsonar.sources="$SOURCES" \
+                            -Dsonar.sourceEncoding=UTF-8 \
+                            -Dsonar.exclusions='**/build/**,**/target/**,**/node_modules/**'
+                        
+                        echo "✓ Scan submitted to SonarQube"
                     '''
                 }
             }
         }
 
-        stage('Check Quality Gate') {
+        stage('Wait for Quality Gate') {
             when {
                 expression { env.BUILD_TYPE == 'PR' && env.CHANGE_COUNT != '0' }
             }
             steps {
                 timeout(time: 3, unit: 'MINUTES') {
                     script {
+                        echo "Polling quality gate status..."
                         def qgStatus = sh(
                             script: '''
                                 for i in {1..18}; do
@@ -254,6 +319,7 @@ pipeline {
                                         echo "$STATUS"
                                         exit 0
                                     fi
+                                    echo "Attempt $i/18..."
                                     sleep 10
                                 done
                                 echo "TIMEOUT"
@@ -261,22 +327,37 @@ pipeline {
                             returnStdout: true
                         ).trim()
                         env.QG_STATUS = qgStatus
-                        echo "QG Status: ${env.QG_STATUS}"
+                        echo "Quality Gate Result: ${env.QG_STATUS}"
                     }
                 }
             }
         }
 
-        stage('Delete on Pass') {
+        stage('Delete Project on Pass') {
             when {
                 expression { env.BUILD_TYPE == 'PR' && env.CHANGE_COUNT != '0' && env.QG_STATUS == 'OK' }
             }
             steps {
                 sh '''
+                    echo "✓✓✓ Quality gate PASSED"
+                    echo "Deleting temp project: ${SONAR_PR_KEY}"
                     curl -s -X POST -u "${SONAR_TOKEN}:" \
                         -d "project=${SONAR_PR_KEY}" \
                         "${SONAR_HOST_URL}/api/projects/delete"
-                    echo "Project deleted"
+                    echo "✓ Project deleted"
+                '''
+            }
+        }
+
+        stage('Preserve Project on Fail') {
+            when {
+                expression { env.BUILD_TYPE == 'PR' && env.CHANGE_COUNT != '0' && env.QG_STATUS != 'OK' }
+            }
+            steps {
+                sh '''
+                    echo "✗✗✗ Quality gate FAILED"
+                    echo "Preserving project for review: ${SONAR_PR_KEY}"
+                    echo "Review at: ${SONAR_HOST_URL}/dashboard?id=${SONAR_PR_KEY}"
                 '''
             }
         }
@@ -287,26 +368,33 @@ pipeline {
             }
             steps {
                 script {
-                    def state, desc
+                    def state, desc, targetUrl
                     
                     if (env.CHANGE_COUNT == '0') {
                         state = 'success'
                         desc = 'No code changes'
+                        targetUrl = ''
                     } else if (env.QG_STATUS == 'OK') {
                         state = 'success'
-                        desc = 'Quality gate passed'
+                        desc = 'Quality gate passed ✓'
+                        targetUrl = "${SONAR_HOST_URL}/dashboard?id=${SONAR_BASE_KEY}"
+                    } else if (env.QG_STATUS == 'TIMEOUT') {
+                        state = 'failure'
+                        desc = 'Quality gate analysis timeout'
+                        targetUrl = "${SONAR_HOST_URL}/dashboard?id=${SONAR_PR_KEY}"
                     } else {
                         state = 'failure'
-                        desc = 'Quality gate failed'
+                        desc = 'Quality gate failed - review issues'
+                        targetUrl = "${SONAR_HOST_URL}/dashboard?id=${SONAR_PR_KEY}"
                     }
                     
                     sh '''
                         curl -s -X POST \
                             -H "Authorization: token ${GITHUB_TOKEN}" \
                             -H "Content-Type: application/json" \
-                            -d '{"state":"''' + state + '''","description":"''' + desc + '''","context":"Jenkins/SonarQube"}' \
+                            -d '{"state":"''' + state + '''","description":"''' + desc + '''","target_url":"''' + targetUrl + '''","context":"Jenkins/SonarQube"}' \
                             "${REPO_URL}/statuses/${COMMIT_HASH}"
-                        echo "GitHub updated: ${state}"
+                        echo "✓ GitHub status updated"
                     '''
                 }
             }
@@ -314,6 +402,20 @@ pipeline {
     }
 
     post {
+        failure {
+            script {
+                if (env.BUILD_TYPE == 'PR') {
+                    sh '''
+                        curl -s -X POST \
+                            -H "Authorization: token ${GITHUB_TOKEN}" \
+                            -H "Content-Type: application/json" \
+                            -d '{"state":"error","description":"Pipeline execution failed","target_url":"${BUILD_URL}","context":"Jenkins/Pipeline"}' \
+                            "${REPO_URL}/statuses/${COMMIT_HASH}"
+                    '''
+                }
+            }
+        }
+        
         always {
             cleanWs()
         }
