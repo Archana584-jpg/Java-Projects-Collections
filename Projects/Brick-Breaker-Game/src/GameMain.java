@@ -6,3 +6,14 @@ public class ScanTest {
         System.out.println("Testing SonarQube integration");
     }
 }
+
+// Feature: SonarQube Integration Test
+public class SonarQubeTest {
+    public void testMethod() {
+        System.out.println("This is a test for SonarQube scanning");
+        int x = 10;
+        int y = 20;
+        int result = x + y;
+        System.out.println("Result: " + result);
+    }
+}
