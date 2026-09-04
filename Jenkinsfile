@@ -24,18 +24,25 @@ pipeline {
                     echo "Detecting Build Type"
                     echo "════════════════════════════════════"
                     
-                    // Parse repo owner/name from URL
+                    // Parse repo owner/name from URL using simple string methods (no regex)
                     def repoUrl = sh(script: 'git config --get remote.origin.url', returnStdout: true).trim()
                     repoUrl = repoUrl.replaceAll('\\.git$', '')
-                    def repoMatch = (repoUrl =~ /github\.com[:/]([^/]+)\/(.+)$/)
                     
-                    if (!repoMatch) {
-                        echo "ERROR: Could not parse repo URL: ${repoUrl}"
+                    // Extract owner and repo from URL
+                    def owner, repo
+                    if (repoUrl.contains('github.com/')) {
+                        def parts = repoUrl.split('github.com/')[1].split('/')
+                        owner = parts[0]
+                        repo = parts[1]
+                    } else if (repoUrl.contains('github.com:')) {
+                        def parts = repoUrl.split('github.com:')[1].split('/')
+                        owner = parts[0]
+                        repo = parts[1]
+                    } else {
+                        echo "ERROR: Could not parse repo from URL: ${repoUrl}"
                         error("Invalid GitHub repo URL")
                     }
                     
-                    def owner = repoMatch[0][1]
-                    def repo = repoMatch[0][2]
                     env.GITHUB_REPO = "${owner}/${repo}"
                     env.GITHUB_API_REPO = "${GITHUB_API}/repos/${owner}/${repo}"
                     
@@ -285,7 +292,7 @@ pipeline {
                         '''
                     } else {
                         echo "✓ Project already exists"
-                    fi
+                    }
                 }
             }
         }
