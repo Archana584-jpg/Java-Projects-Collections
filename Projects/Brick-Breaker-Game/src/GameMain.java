@@ -17,3 +17,19 @@ public class SonarQubeTest {
         System.out.println("Result: " + result);
     }
 }
+
+// SonarQube Test Implementation
+public class SonarQubeTest {
+    
+    public void validateScan() {
+        System.out.println("Testing SonarQube pipeline integration");
+        int score = calculateScore(10, 5);
+        System.out.println("Score: " + score);
+    }
+    
+    private int calculateScore(int points, int bonus) {
+        int total = points + bonus;
+        System.out.println("Total points: " + total);
+        return total;
+    }
+}
