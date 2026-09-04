@@ -37,3 +37,11 @@ public class SonarQubeTest {
 // test
 // test
 // test code
+
+// New Test Method
+public void testNewFeature() {
+    System.out.println("Testing new feature");
+    int x = 10;
+    int y = 20;
+    System.out.println("Sum: " + (x + y));
+}
